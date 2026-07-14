@@ -1,0 +1,21 @@
+FROM python:3.12-slim AS base
+
+WORKDIR /srv
+
+RUN pip install --no-cache-dir uv
+
+COPY pyproject.toml uv.lock* README.md ./
+RUN uv sync --no-dev --no-install-project
+
+COPY app/ ./app/
+COPY providers/ ./providers/
+COPY shared/ ./shared/
+
+RUN uv sync --no-dev
+
+EXPOSE 8000
+
+# --no-sync: the image was already synced at build time above — without this, `uv run` re-resolves
+# and re-syncs (including the dev dependency group) on every container start, which is both slow
+# and pulls packages a production image has no business installing at runtime.
+CMD ["uv", "run", "--no-sync", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

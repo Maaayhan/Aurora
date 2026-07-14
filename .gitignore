@@ -13,3 +13,13 @@ postgres-data/
 redis-data/
 CLAUDE.md
 JD_AI_Software_Engineer_(Back_End).md
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+.coverage

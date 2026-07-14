@@ -1,0 +1,97 @@
+# Aurora — local topology, DEPLOYMENT.md §1.
+#
+# Ollama is NOT a service here — it runs natively on the host (Docker Desktop
+# on macOS doesn't pass Metal through to Linux containers). api/worker reach
+# it via MODEL_PROVIDER_URL=http://host.docker.internal:11434 from .env.
+#
+# prometheus/grafana/jaeger are Phase 3 scope (ROADMAP.md) — added when
+# observability work starts, not stubbed empty here.
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.api
+    ports:
+      - "8000:8000"
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://aurora:aurora@postgres:5432/aurora
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  worker:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.worker
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://aurora:aurora@postgres:5432/aurora
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    # `docker compose up --scale worker=3` = add inference-capacity replicas
+    # (ARCHITECTURE.md §3). --concurrency on the Celery command further caps
+    # in-flight generations per replica.
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: aurora
+      POSTGRES_PASSWORD: aurora
+      POSTGRES_DB: aurora
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aurora"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  flower:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.worker
+    command: ["uv", "run", "--no-sync", "celery", "-A", "worker.celery_app", "flower", "--port=5555"]
+    ports:
+      - "5555:5555"
+    env_file: .env
+    environment:
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
+    depends_on:
+      redis:
+        condition: service_healthy
+
+volumes:
+  postgres-data:
+  redis-data:
