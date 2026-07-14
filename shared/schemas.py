@@ -17,6 +17,13 @@ from pydantic.alias_generators import to_camel
 from shared.errors import ErrorCode
 
 
+# 【卷 二.二.一】这个项目里"数据在几层之间传递时,长相分别是什么样"是个值得记住的知识点：
+# 【卷】ChatChunk(Provider 内部,snake_case,Python 属性访问) → StreamMessage(Redis pub/sub 上跑的,
+# 【卷】worker 发布/app 订阅) → SSEEvent(最终吐给 HTTP 客户端的,camelCase JSON)。
+# 【卷】为什么不是一种格式走到底？因为每一层的"读者"不同：Provider 内部只有 Python 代码在读，
+# 【卷】没必要在意 JSON 命名风格；一过 Redis 边界和 HTTP 边界，读者就变成了"跨语言/跨系统的消费者"，
+# 【卷】这时候 API_SPEC.md 约定的 camelCase 才有意义。CamelModel 就是"Python 端用 snake_case 写，
+# 【卷】序列化成 JSON 时自动转 camelCase"的统一底座，两头都不用手动 alias。
 class CamelModel(BaseModel):
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
 
@@ -43,6 +50,13 @@ class ProviderHealth(CamelModel):
     error: str | None = None
 
 
+# 【卷 二.二.二】重点看 messages 字段：这是"完整的对话历史"，不是"这一条新消息"。也就是说，
+# 【卷】app/ 在派发任务之前，已经把 Redis 缓存 + Postgres 兜底查出来的历史上下文拼好，
+# 【卷】一次性塞进这个 payload 里。为什么不让 worker 自己去查历史？因为这样 worker 的
+# 【卷】唯一外部依赖就只剩"模型服务"了——不用连 Postgres/Redis 也能独立测试
+# 【卷】（见 providers/mock_provider.py），
+# 【卷】而且这个 payload 本身就是"这次请求到底发了什么给模型"的完整快照，出问题了可以直接拿它复现，
+# 【卷】不用去猜"当时历史记录是什么样"。
 class InferenceTaskPayload(CamelModel):
     """The Celery task payload — DATA_MODEL.md §3.
 

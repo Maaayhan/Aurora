@@ -12,6 +12,11 @@ from collections.abc import AsyncIterator, Callable
 from shared.schemas import ChatChunk, ChatMessage, ProviderHealth
 
 
+# 【卷 三.三】留意 fail_after_chunks 这个参数：它能精确控制"在发出第几个 token 之后失败"。
+# 【卷】这是专门为了测试 worker/tasks.py 里那条"重试只在还没发出任何 token 之前才安全"的
+# 【卷】规则而设计的——
+# 【卷】fail_after_chunks=0 模拟"一个 token 都没发就失败"（应该重试），fail_after_chunks=1 模拟
+# 【卷】"发了一个 token 之后才失败"（不能重试，只能报终态错误）。测试文件里能看到两种场景都覆盖了。
 class MockProvider:
     def __init__(
         self,

@@ -49,6 +49,13 @@ queue_depth = Gauge(
     registry=registry,
 )
 
+# 【卷 四.六.二】这两个指标是整个监控体系里最"懂推理服务"的部分，普通 Web API 不会有这两个概念：
+# 【卷】TTFT（首字延迟）——从用户发出请求，到第一个 token 吐出来要多久，直接决定用户"感觉快不快"；
+# 【卷】TPOT（每 token 耗时）——生成过程中平均吐一个 token 要多久，决定"读起来顺不顺"。
+# 【卷】这两个指标只有在真正理解"流式推理"这个场景（而不是把它当成普通的一次性 HTTP 请求）
+# 【卷】才会想到要measure。具体在哪里被记录、怎么算出来的，去看 七.一 app/api/chat.py 的
+# 【卷】_sse_generator——第一次收到 token 事件时记 TTFT，收到 done 事件时用 completion_tokens
+# 【卷】反推 TPOT。
 ttft_seconds = Histogram(
     "aurora_ttft_seconds",
     "Time to first token — request accepted to first SSE token event",

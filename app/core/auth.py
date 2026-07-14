@@ -48,6 +48,13 @@ def _decode_access_token(token: str, settings: Settings) -> str:
     return subject
 
 
+# 【卷 四.三.一】这是一个容易被追问的设计决策："密码不是应该用 bcrypt 之类的慢哈希吗？"
+# 【卷】答案：bcrypt 解决的是"低熵、人类能记住的密码"场景——密码空间小，攻击者可以离线暴力破解，
+# 【卷】所以要故意让哈希变慢来拖慢暴力破解速度。但 API Key 是程序生成的高熵随机字符串
+# 【卷】（见 scripts/create_user.py 里 secrets.token_urlsafe(24)），本身就没法暴力破解，
+# 【卷】慢哈希在这里只有坏处没有好处：bcrypt 不支持"直接用哈希值做数据库索引查找"，
+# 【卷】要验证一个 key 就得把它跟表里每一行都做一次慢比对——请求量一大就是灾难。
+# 【卷】SHA-256 是确定性的快哈希，可以直接建唯一索引，O(1) 查一次就命中，这才是这个场景该用的工具。
 def hash_api_key(raw_key: str) -> str:
     """SHA-256, not bcrypt: API keys are high-entropy random tokens (unlike passwords), so a
     fast deterministic hash is the right tradeoff — it lets `api_key_hash` stay a unique-indexed
@@ -65,6 +72,11 @@ async def resolve_api_key(raw_key: str, db: AsyncSession) -> Identity:
     return Identity(id=str(user.id))
 
 
+# 【卷 四.三.二】这是 FastAPI 的依赖注入（Dependency Injection）用法：路由函数只要写
+# 【卷】`identity: Identity = Depends(get_current_identity)`，FastAPI 会自动调用这个函数、
+# 【卷】把结果注入进去，路由函数本身完全不用关心"用户是怎么登录的"。两种凭证（JWT/API Key）
+# 【卷】在这里被收敛成同一个 Identity 类型返回——下游的限流、消息归属等逻辑只认 identity.id，
+# 【卷】不需要知道也不关心这次请求到底是用哪种方式认证的。
 async def get_current_identity(
     authorization: str | None = Header(default=None),
     x_api_key: str | None = Header(default=None, alias="X-API-Key"),

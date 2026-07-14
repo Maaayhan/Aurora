@@ -12,6 +12,11 @@ from typing import Literal
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+# 【卷 四.一.一】这个类是"快速失败"（fail fast）原则的体现：pydantic-settings 在 Settings() 实例化
+# 【卷】的那一刻就会校验所有字段类型，缺失必填项或者类型不对会直接抛异常、进程启动不起来。
+# 【卷】对比另一种做法——不校验，配置缺了就在第一次真正用到它的地方（可能是深夜某个请求里）报错——
+# 【卷】"部署时就炸"比"运行时某个随机请求炸"要好排查得多，这也是为什么下面 get_settings() 要在
+# 【卷】模块加载阶段就被各处 import 触发调用，而不是拖到请求处理逻辑里才去读环境变量。
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
@@ -63,6 +68,10 @@ class Settings(BaseSettings):
     max_message_length: int = 4000
 
 
+# 【卷 四.一.二】@lru_cache 加在一个无参函数上，效果就是"单例"：第一次调用真正构造 Settings()，
+# 【卷】之后每次调用都直接返回同一个缓存对象，不会重复读环境变量/重复校验。全项目所有需要配置的
+# 【卷】地方都调 get_settings()，而不是各自 import Settings 再各自实例化——这样能保证整个进程
+# 【卷】生命周期内，所有模块看到的配置永远是同一份、同一个值。
 @lru_cache
 def get_settings() -> Settings:
     return Settings()

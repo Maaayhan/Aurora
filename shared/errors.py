@@ -5,6 +5,11 @@ thing whether it shows up in an SSE `error` event, an HTTP JSON error body, or
 a log line.
 """
 
+# 【卷 二.一.一】学习起点：这个文件体现的是"单一事实来源"（single source of truth）的设计思路。
+# 【卷】app/ 和 worker/ 是两个完全独立的进程，不共享内存——如果各自定义一套错误码，
+# 【卷】迟早会出现"同一个语义在两边写成不同字符串"的漂移。把枚举放进 shared/，
+# 【卷】两边 import 同一份定义，就把"错误码语义一致"这件事从"人肉约定"变成了"编译期/类型系统保证"。
+
 from enum import StrEnum
 
 
@@ -20,6 +25,9 @@ class ErrorCode(StrEnum):
     CANCELLED = "CANCELLED"
 
 
+# 【卷 二.一.二】注意这里只有两个码是"可重试"的，RATE_LIMITED、CONVERSATION_NOT_FOUND 等都不在里面——
+# 【卷】因为"可重试"这个属性描述的是"worker 内部要不要自动重试这次模型调用"，跟"客户端要不要
+# 【卷】重新发起请求"是两回事。客户端永远看不到重试过程，只会收到最终结果（成功或终态错误）。
 # Whether a failure with this code happened before any token reached the client,
 # and is therefore safe to retry per ERROR_HANDLING.md §3 ("retries apply only to
 # failures that occur before any token has been streamed"). This is worker-internal

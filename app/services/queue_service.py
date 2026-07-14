@@ -43,6 +43,13 @@ def cancel_key(request_id: str) -> str:
     return f"cancel:{request_id}"
 
 
+# 【卷 五.二.一】全项目最容易出竞态条件（race condition）的地方，函数名和调用顺序都不是巧合。
+# 【卷】想象一下如果反过来——先 dispatch_inference() 派发任务，再 subscribe() 订阅频道：
+# 【卷】如果 worker 手速够快，任务在你订阅之前就跑完了、把第一个 token 发布到了 Redis 频道上，
+# 【卷】这条消息永远不会有人收到（Redis pub/sub 是"发布时没人订阅=直接丢弃"，不是消息队列，
+# 【卷】不会给你留着）。所以 app/api/chat.py（七.一）里这两个函数的调用顺序被严格固定为
+# 【卷】"先 subscribe，确认订阅成功，再 dispatch"——用两行代码的顺序解决了一个分布式系统里
+# 【卷】经典的"生产者先于消费者"竞态问题。
 async def subscribe(redis: Redis, request_id: str) -> PubSub:
     """Must be called and awaited (subscription confirmed) before `dispatch_inference` — otherwise
     a fast worker could publish the first chunk before anyone is listening (ARCHITECTURE.md §5,
@@ -73,6 +80,12 @@ async def forward_events(
     can interleave a client-disconnect check between messages — SEQUENCE_DIAGRAMS.md §2 needs the
     API to notice a closed connection even while no new chunk has arrived yet.
     """
+    # 【卷 五.二.二】为什么不用更"直觉"的 `async for raw in pubsub.listen()`？因为 listen() 是
+    # 【卷】一个阻塞调用——在下一条消息真正到达之前，这个协程会一直挂起，中间没有任何机会检查
+    # 【卷】"客户端是不是已经把连接断了"。改成 `get_message(timeout=1.0)` 之后，最多等 1 秒
+    # 【卷】就会返回一次（哪怕是 None），循环体每次都能先问一句 is_disconnected()——用一个
+    # 【卷】轮询超时，换来了"能及时发现断线"这个能力。断线之后具体怎么处理，去看 七.一
+    # 【卷】app/api/chat.py 的 _sse_generator 怎么把这个 is_disconnected 回调传进来的。
     while True:
         if is_disconnected is not None and await is_disconnected():
             return

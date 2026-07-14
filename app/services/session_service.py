@@ -115,6 +115,13 @@ async def append_message(
         retry_count=retry_count,
     )
     db.add(message)
+    # 【卷 五.一.一】这里用 func.now()（让数据库自己算当前时间），而不是 message.created_at
+    # 【卷】（Python 对象里的属性）——这是 DEVLOG.md 问题 #7 的真实现场。message.created_at
+    # 【卷】是一个 server_default=func.now() 的字段，只有真正写入数据库之后才会被赋值，
+    # 【卷】这里 db.add() 只是把对象加进这次事务的"待提交"队列，还没 flush/commit，
+    # 【卷】此时读 message.created_at 在 Python 里就是 None——如果直接拿它去更新
+    # 【卷】conversations.updated_at（NOT NULL 字段），第二条消息开始就会报约束错误。
+    # 【卷】被单元测试当场抓到，修法就是让数据库自己算这个时间戳，不依赖 Python 对象的状态。
     await db.execute(
         update(Conversation)
         .where(Conversation.id == uuid.UUID(conversation_id))
@@ -123,6 +130,8 @@ async def append_message(
     await db.commit()
     await db.refresh(message)
 
+    # 【卷 五.一.二】写 Postgres 的同时也更新 Redis 缓存（write-through），跟下面 get_context()
+    # 【卷】的 cache-aside 读取配合，保证"写完之后马上读"不会读到 Postgres 里的旧数据。
     await _cache_append(redis, conversation_id, role=role, content=content)
     return message
 
@@ -137,6 +146,10 @@ async def get_context(
     """Resolve the full message context to send the model — cache-aside over Redis, falling
     back to Postgres on a cache miss (DATA_MODEL.md §3: this happens in app/, before task
     dispatch, so the worker's only dependency stays the model provider)."""
+    # 【卷 五.一.三】这是标准的 cache-aside（旁路缓存）读取模式：先查 Redis，命中就直接返回；
+    # 【卷】没命中（比如缓存过期、或者这是这个会话第一次被读）就查 Postgres 兜底，查完顺手把结果
+    # 【卷】写回 Redis，让下一次读能命中。对照 DATA_MODEL.md 第 4 节："为什么不能只用一个存储"——
+    # 【卷】Postgres 保证数据不丢，Redis 保证"同一个会话反复对话"时不用每一轮都查数据库。
     cached = await redis.get(_session_key(conversation_id))
     if cached is not None:
         raw = json.loads(cached)

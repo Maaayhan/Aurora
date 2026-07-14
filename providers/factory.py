@@ -9,6 +9,9 @@ from providers.mock_provider import MockProvider
 from providers.ollama_provider import OllamaProvider
 
 
+# 【卷 三.四】全项目唯一一处读取"用哪个 Provider"这个决策的地方。工厂模式的价值不在于代码量少，
+# 【卷】而在于"分支判断"只出现这一次——如果每个用到 provider 的地方都自己 if/else 判断
+# 【卷】MODEL_PROVIDER，未来加一个新实现（比如真的接了 vLLM）就要全项目搜索修改，容易漏改。
 def build_provider(
     provider_name: str, *, provider_url: str, default_model: str, timeout_seconds: float
 ) -> ModelProvider:

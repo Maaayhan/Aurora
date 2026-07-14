@@ -12,6 +12,12 @@ rule (ARCHITECTURE.md §7), because pinging the model provider is explicitly
 this module's documented job (ARCHITECTURE.md §6 module table).
 """
 
+# 【卷 七.三】三.一 讲过 ModelProvider 是"worker/ 唯一允许依赖的模型接口"，这个文件是全项目
+# 【卷】唯一的例外——app/api/health.py 直接 import 了 providers/。为什么这里可以破例？
+# 【卷】因为"给模型服务发一个轻量探活请求"本来就是 /health 端点明确的职责（API_SPEC.md），
+# 【卷】跟"worker/ 不该关心 HTTP"、"app/ 不该跑推理逻辑"这两条边界规则并不冲突——这里只是
+# 【卷】问一句"你还活着吗"，不是真的在做推理调用。其余几个路由文件（auth.py/conversations.py/
+# 【卷】feedback.py）逻辑都比较简单，扫一遍即可，不需要在这几个文件上花太多时间。
 import time
 from functools import lru_cache
 from typing import Literal

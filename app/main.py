@@ -33,6 +33,13 @@ app.include_router(feedback.router)
 app.include_router(health.router)
 
 
+# 【卷 七.二.一】这个中间件对"每一个"请求都生效，不只是 /chat——这是四.六.一里说的
+# 【卷】bind_request_id 真正被触发的地方之一。注意 request_id 的来源：优先用客户端自己传的
+# 【卷】X-Request-Id 头，没有才生成一个新的——这样如果客户端自己有更上游的链路追踪 ID，
+# 【卷】可以直接传进来，全链路用同一个 ID，而不是被这里强行覆盖。try/except 里两条分支都会
+# 【卷】记一条结构化日志（成功路径记 request_completed，异常路径记 request_failed），
+# 【卷】保证"这个请求最后到底发生了什么"永远有迹可循，不会因为一个未处理异常就在日志里
+# 【卷】凭空消失。
 @app.middleware("http")
 async def request_logging(request: Request, call_next):
     request_id = request.headers.get("X-Request-Id") or str(uuid.uuid4())
@@ -63,6 +70,11 @@ async def request_logging(request: Request, call_next):
     return response
 
 
+# 【卷 七.二.二】这是"错误码体系"（二.一）真正落地成 HTTP 响应的地方——全局唯一一处
+# 【卷】catch AuroraError 的地方。任何路由函数只要 raise AuroraError(某个 ErrorCode, ...)，
+# 【卷】这里就会自动查表把它转成正确的 HTTP 状态码，路由函数自己完全不用关心状态码怎么定。
+# 【卷】RATE_LIMITED 的 Retry-After 头也是在这里统一加上的（对照 七.一 chat.py 里
+# 【卷】raise AuroraError 时传的 retry_after_seconds 参数）。
 @app.exception_handler(AuroraError)
 async def aurora_error_handler(request: Request, exc: AuroraError) -> JSONResponse:
     status_code = HTTP_STATUS_BY_CODE[exc.code]

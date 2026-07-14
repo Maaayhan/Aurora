@@ -78,6 +78,14 @@ async def app_client(monkeypatch, db_session_factory, fake_redis):
     app.dependency_overrides.clear()
 
 
+# 【卷 八.一】这个 fixture 本身就踩过一个坑，很值得作为收官案例：第一版只做了"往 Redis 频道
+# 【卷】发布 token/done 消息"，完全没做"把助手回复写进 Postgres"这件事——结果测试多轮对话、
+# 【卷】反馈接口的用例全部失败，报的还是 StopIteration 这种看起来跟本意完全不相关的错误
+# 【卷】（因为测试代码里 `next(m for m in messages if m["role"]=="assistant")` 在空列表上
+# 【卷】找不到东西）。根因是：持久化到 Postgres 本来就是真实 worker（六.三.三）的职责，
+# 【卷】这个 fake 只模拟了"消息总线"那一半，没模拟"worker 真正做的另一半事情"——这提醒我们，
+# 【卷】写测试替身（fake/mock/stub）的时候，必须先想清楚"真实实现到底承担了哪些职责"，
+# 【卷】漏掉一半职责的 fake，会让测试看起来在测，实际上只测了一半系统行为。
 @pytest.fixture
 def fake_dispatch(monkeypatch, fake_redis, db_session_factory):
     """Stands in for a real Celery worker: publishes a canned token stream to

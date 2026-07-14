@@ -1,0 +1,16 @@
+{
+  "highlight.regexes": {
+    "(.*【卷】.*)$": {
+      "regexFlags": "g",
+      "decorations": [
+        {
+          "backgroundColor": "rgba(155, 89, 182, 0.28)",
+          "color": "#D9A6F5",
+          "fontWeight": "bold",
+          "overviewRulerColor": "rgba(155, 89, 182, 0.9)",
+          "isWholeLine": true
+        }
+      ]
+    }
+  }
+}

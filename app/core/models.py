@@ -13,6 +13,11 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.db import Base
 
+# 【卷 四.二.二】这个文件是 docs/DATA_MODEL.md 第 1 节表结构的逐字段翻译，扫一眼字段和
+# 【卷】外键关系（User→Conversation→Message→Feedback，ModelDeployment 独立）即可，不用精读。
+# 【卷】唯一值得留意的：这里没有任何字段是"从 Redis 冗余过来的"——Postgres 是唯一事实来源，
+# 【卷】Redis 只做缓存/临时协调（详见五.一 session_service.py 和 docs/DATA_MODEL.md 第 4 节）。
+
 
 class User(Base):
     __tablename__ = "users"

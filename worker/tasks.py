@@ -96,6 +96,14 @@ async def _run_inference_async(
             error_message=str(exc),
         )
 
+    # 【卷 六.三.一】这是 DEVLOG.md 问题 #8 的真实现场，被测试直接抓到。原来的代码逻辑是：
+    # 【卷】"async for 循环里每轮检查一次 cancel_check()"——听起来天衣无缝，但漏了一种情况：
+    # 【卷】如果客户端在请求一开始、Provider 还没吐出第一个 token 之前就已经取消了，
+    # 【卷】MockProvider/OllamaProvider 内部自己也在检查 cancel_check（它们的 chat() 实现里
+    # 【卷】同样会 poll 这个标记），会直接返回一个"一次都没 yield 过"的空生成器。这样一来，
+    # 【卷】外层这个 `async for chunk in ...` 循环体一次都不会执行，里面那句 `if cancel_check()`
+    # 【卷】自然也从来没机会跑——函数直接掉到最后，落进"success"分支，把一次取消误报成了成功。
+    # 【卷】修法很简单：循环走完之后，不管是正常结束还是零次迭代，都再问一次 cancel_check()。
     # A provider whose generator honors `cancel_check` internally (as `MockProvider` and
     # `OllamaProvider` both do) can exit the loop above with zero iterations — the `if
     # cancel_check()` inside the loop body then never runs. Check once more after the loop so a
@@ -117,6 +125,31 @@ async def _run_inference_async(
 async def _persist_assistant_message(
     payload: InferenceTaskPayload, outcome: InferenceOutcome, latency_ms: int, retry_count: int
 ) -> None:
+    # 【卷 六.三.三】全场最有技术深度的一个 bug（DEVLOG.md 问题 #13），建议逐字读完这段注释。
+    #
+    # 先回忆 四.二.一 埋的伏笔：app/core/db.py 里的 _engine / _session_factory 是模块加载时
+    # 创建一次的全局单例。这个设计的隐含前提是"创建它的那个 asyncio 事件循环，会一直存活到
+    # 进程结束"——对 app/（FastAPI 跑在 Uvicorn 里，从启动到关闭只有一个事件循环）完全成立。
+    #
+    # 但 worker 的执行模型不一样：run_inference（六.三.二）是一个普通的同步函数（Celery task
+    # 本体不是 async def），它内部用 asyncio.run(...) 来跑异步逻辑——而 asyncio.run() 每次
+    # 调用都会创建一个全新的事件循环，跑完就把这个循环彻底关掉。第一次任务调用 asyncio.run()
+    # 时，如果这时候才第一次真正用到 app.core.db 的那个全局 engine，它底层的 asyncpg 连接
+    # 会绑定在"这一次"的事件循环上；等这次 asyncio.run() 结束、循环被关闭，这些连接其实已经
+    # 死了，但连接池对象本身还留在内存里，等着"下一次"被拿出来复用。
+    #
+    # 到了第二个任务，run_inference 又调用一次全新的 asyncio.run()——又是一个全新的事件循环。
+    # 这次如果还是用同一个全局单例 engine，连接池会把第一次任务遗留下来的、绑定在"已经死掉的
+    # 循环"上的连接拿出来用——于是就崩了：`RuntimeError: Future ... attached to a different
+    # loop`。这个 bug 的阴险之处在于：本地单元测试全程只有 pytest-asyncio 提供的同一个事件
+    # 循环，永远不会触发"跨循环复用连接"这个条件，所以 39 个测试全绿、mypy/ruff 全过，直到
+    # 真正起了一个 Celery worker 进程、连续发了两次真实请求，才在第二次请求上炸出来。
+    #
+    # 修法：不用共享单例，这个函数自己开一个"生命周期只跟这一次 asyncio.run() 一样长"的
+    # Redis 客户端，用完显式关掉；Postgres 那边则是在用完之后调用 get_engine().dispose()，
+    # 把连接池清空——这样"下一次" asyncio.run() 再用到这个 engine 时，拿到的一定是在
+    # "当前这个循环"里全新建立的连接，不会跟任何已经死掉的循环产生瓜葛。
+    #
     # Deliberately not app.core.db/redis's shared singletons: those are created once at import
     # time and, for asyncpg/redis-py's async clients, get bound to whichever event loop is
     # running the first time they're actually used. app/ (Uvicorn) has exactly one loop for the
@@ -171,6 +204,15 @@ def run_inference(self, payload_dict: dict) -> None:
             logger.info("inference_cancelled")
             return
 
+        # 【卷 六.三.二】这里是"重试还是终态报错"的核心判断，一定要吃透这个 if 条件：
+        # 【卷】`not outcome.any_tokens_streamed`——已经有 token 发给客户端了，就绝不允许重试，
+        # 【卷】哪怕重试次数还没用完。原因很直接：客户端已经在屏幕上渲染了半句话，你没法让它
+        # 【卷】"撤回重来"，这时候唯一诚实的选择就是报一个终态错误，让半句话保持半句话的样子，
+        # 【卷】而不是悄悄在后台重新生成、再补发一段可能完全不连贯的内容。
+        # 【卷】`raise self.retry(countdown=backoff, ...)` 用的是 Celery 原生机制，不是自己写
+        # 【卷】一个 while 循环重试——好处是 self.request.retries 这个计数器由 Celery 框架维护，
+        # 【卷】配合六.一.一的 task_acks_late，就算这次重试期间 worker 进程本身挂了，任务被
+        # 【卷】另一个 worker 捞起来时，重试计数依然是准的，不会因为进程重启就"重置成 0 次"。
         if outcome.status == "error":
             attempt_number = self.request.retries + 1
             # Retries are only safe before any token has reached the client (ERROR_HANDLING.md
