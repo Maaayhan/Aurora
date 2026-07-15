@@ -1,4 +1,4 @@
-"""The 7 Prometheus metrics required by ROADMAP.md Phase 1.
+"""The 7 Prometheus metrics required by ROADMAP.md Phase 1, plus Phase 2 additions.
 
 TTFT (time to first token) and TPOT (time per output token) are what make
 this look like real inference-serving observability rather than generic API
@@ -58,6 +58,20 @@ ttft_seconds = Histogram(
 tpot_seconds = Histogram(
     "aurora_tpot_seconds",
     "Time per output token, averaged over a completed generation",
+    registry=registry,
+)
+
+# --- Phase 2 additions (ERROR_HANDLING.md §4-5) ---
+
+backpressure_rejections_total = Counter(
+    "aurora_backpressure_rejections_total",
+    "Requests rejected before dispatch because the queue depth was over threshold",
+    registry=registry,
+)
+
+circuit_breaker_state = Gauge(
+    "aurora_circuit_breaker_state",
+    "Current circuit breaker state (0=closed, 1=half_open, 2=open), sampled at request time",
     registry=registry,
 )
 

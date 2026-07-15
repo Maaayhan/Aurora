@@ -28,6 +28,18 @@ class Settings(BaseSettings):
     celery_broker_url: str = "redis://localhost:6379/1"
     celery_result_backend: str = "redis://localhost:6379/2"
     celery_worker_concurrency: int = 4
+    # How long an unacked task stays invisible to other workers after the worker holding it
+    # disappears, before Redis (Celery's broker transport for Redis, specifically — not a
+    # Celery-level setting) makes it visible for redelivery again — ERROR_HANDLING.md §6.
+    # task_acks_late + task_reject_on_worker_lost (worker/celery_app.py) only cover the case
+    # where Celery's own process monitor notices a *child* process died (e.g. one prefork worker
+    # process crashes but the parent survives); if the *entire* worker process tree disappears
+    # at once (container killed, host rebooted), nothing is left to explicitly requeue the
+    # task — recovery depends entirely on this broker-level timeout. Redis transport's own
+    # default is 3600s (1 hour), which is far too slow for a task whose whole point is
+    # sub-minute inference latency; a few minutes is a much more honest ceiling on "how long
+    # before a truly abandoned task gets a chance to run again."
+    celery_visibility_timeout_seconds: int = 300
 
     # Auth
     jwt_secret: str = "change-me-in-real-env"

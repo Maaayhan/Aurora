@@ -8,6 +8,7 @@ generator. It does not itself implement rate limiting, persistence, or
 queueing.
 """
 
+import asyncio
 import time
 import uuid
 from datetime import UTC, datetime
@@ -21,6 +22,8 @@ from app.core.config import Settings, get_settings
 from app.core.db import get_db
 from app.core.logging import bind_request_id, clear_request_context, get_logger
 from app.core.metrics import (
+    backpressure_rejections_total,
+    circuit_breaker_state,
     inference_errors_total,
     queue_depth,
     rate_limit_rejections_total,
@@ -32,6 +35,7 @@ from app.core.metrics import (
 from app.core.rate_limit import check_rate_limit
 from app.core.redis import get_broker_redis, get_redis
 from app.services import queue_service, session_service
+from shared.circuit import CIRCUIT_KEY, CircuitState
 from shared.errors import AuroraError, ErrorCode
 from shared.schemas import (
     ChatRequest,
@@ -40,6 +44,12 @@ from shared.schemas import (
     InferenceTaskPayload,
     TokenEventData,
 )
+
+_CIRCUIT_STATE_GAUGE_VALUE = {
+    CircuitState.CLOSED: 0,
+    CircuitState.HALF_OPEN: 1,
+    CircuitState.OPEN: 2,
+}
 
 router = APIRouter()
 logger = get_logger(__name__)
@@ -67,6 +77,21 @@ async def chat(
             ErrorCode.RATE_LIMITED,
             "Rate limit exceeded",
             retry_after_seconds=rate_limit_result.retry_after_seconds,
+        )
+
+    # Backpressure (ERROR_HANDLING.md §5): checked synchronously, before any Postgres work and
+    # before enqueue — a client over quota already got turned away above; this catches everyone
+    # else when the *system*, not the caller, is the constraint. Rejecting here is what keeps
+    # "the queue got long" from ever becoming "the queue grew unbounded and Redis falls over."
+    broker_redis = get_broker_redis()
+    current_queue_depth = await queue_service.get_queue_depth(broker_redis)
+    queue_depth.set(current_queue_depth)
+    if current_queue_depth > settings.max_queue_depth:
+        backpressure_rejections_total.inc()
+        raise AuroraError(
+            ErrorCode.SERVER_BUSY,
+            "Server is at capacity",
+            retry_after_seconds=5,
         )
 
     if body.conversation_id:
@@ -98,7 +123,11 @@ async def chat(
     pubsub = await queue_service.subscribe(redis, request_id)
     queue_service.dispatch_inference(payload)
 
-    queue_depth.set(await queue_service.get_queue_depth(get_broker_redis()))
+    # circuit:inference lives on the app's own Redis (REDIS_URL), not the Celery broker db —
+    # DATA_MODEL.md §2 lists it alongside session/ratelimit/stream/cancel, not the queue itself.
+    raw_state = await redis.hget(CIRCUIT_KEY, "state")  # type: ignore[misc] # redis-py stub quirk
+    state = CircuitState(raw_state) if raw_state else CircuitState.CLOSED
+    circuit_breaker_state.set(_CIRCUIT_STATE_GAUGE_VALUE[state])
 
     return StreamingResponse(
         _sse_generator(request, redis, pubsub, request_id),
@@ -137,10 +166,28 @@ async def _sse_generator(request: Request, redis, pubsub, request_id: str):
         request_duration_seconds.observe(duration)
         requests_total.labels(status=status).inc()
 
-        if status == "cancelled" and await request.is_disconnected():
-            await queue_service.mark_cancelled(
-                redis, request_id, ttl_seconds=queue_service.CANCEL_KEY_TTL_SECONDS
-            )
+        # `status` stays "cancelled" (its initial value) only if the loop above exited without
+        # ever seeing a done/error event — which happens when the client disconnected. By the
+        # time execution reaches here, the ASGI server may have *already* cancelled this
+        # coroutine directly (uvicorn detects a closed transport independently of, and often
+        # faster than, our own is_disconnected() polling inside forward_events) — so this
+        # `finally` block can itself be running inside an already-cancelled scope. A bare
+        # `await` here would immediately re-raise CancelledError and abort everything below it,
+        # silently losing the mark_cancelled() write the worker depends on to actually stop
+        # generating — this was a real, reproducible bug: killing a client mid-stream never
+        # reached the worker at all, and it ran to completion anyway. asyncio.shield() runs each
+        # awaitable to completion in the background even if this coroutine is cancelled again
+        # while awaiting it, and the surrounding try/except keeps that re-raised CancelledError
+        # from also skipping the logging and pubsub cleanup that follow.
+        if status == "cancelled":
+            try:
+                await asyncio.shield(
+                    queue_service.mark_cancelled(
+                        redis, request_id, ttl_seconds=queue_service.CANCEL_KEY_TTL_SECONDS
+                    )
+                )
+            except asyncio.CancelledError:
+                pass
             logger.info("chat_request_cancelled", duration_seconds=round(duration, 3))
         else:
             logger.info(
@@ -149,6 +196,9 @@ async def _sse_generator(request: Request, redis, pubsub, request_id: str):
                 duration_seconds=round(duration, 3),
             )
 
-        await pubsub.unsubscribe(queue_service.stream_channel(request_id))
-        await pubsub.aclose()
+        try:
+            await asyncio.shield(pubsub.unsubscribe(queue_service.stream_channel(request_id)))
+            await asyncio.shield(pubsub.aclose())
+        except asyncio.CancelledError:
+            pass
         clear_request_context()

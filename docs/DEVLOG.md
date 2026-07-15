@@ -318,3 +318,136 @@ Celery worker process, or a real Ollama response shape.
     logging by default, and treats anything it captures that isn't from its own logger as
     `WARNING`. *Fix*: `worker_redirect_stdouts=False` in `celery_app.conf`, letting structlog's
     already-leveled JSON lines pass through untouched.
+
+---
+
+## 2026-07-15 — Phase 2 (Production hardening)
+
+Built on a new branch, `phase2-4`, off `main` (kept separate from `study/phase1-walkthrough` so
+the guided-tour annotations don't mix into further feature work). Scope per `ROADMAP.md`: circuit
+breaker (`ERROR_HANDLING.md` §4), backpressure rejection at the API (§5), and the queue-wait vs.
+inference timeout distinction (§2) — the three Phase 1 deferred exactly because Phase 2 hadn't
+started yet.
+
+**Built:**
+
+- **`worker/reliability.py:CircuitBreaker`** — closed/open/half-open state machine, backed by the
+  `circuit:inference` Redis hash so every worker replica converges on the same view without each
+  one independently rediscovering an outage. `DATA_MODEL.md` documents the hash as
+  `(state, failureCount, openedAt)`; a fourth field, `windowStart`, was added — not in the
+  original doc, but required to make "N failures within a sliding window" a real sliding window
+  instead of an all-time counter that never resets. Disclosed as an extension, not treated as a
+  silent deviation.
+- **`shared/circuit.py`** — the `CircuitState` enum and `circuit:inference` key name were pulled
+  out of `worker/reliability.py` into `shared/`, specifically so `app/api/chat.py` could read
+  circuit state for a `GET /metrics` gauge (`aurora_circuit_breaker_state`) without `app/` ever
+  importing anything from `worker/` — the same process-boundary discipline `queue_service.py`
+  established in Phase 1 (own producer client instead of importing `worker.celery_app`), applied
+  again here.
+- **Backpressure** (`app/api/chat.py`) — queue depth checked synchronously via
+  `queue_service.get_queue_depth`, before any Postgres work, before enqueue; over
+  `MAX_QUEUE_DEPTH` → `503 SERVER_BUSY` immediately, plus a new `aurora_backpressure_rejections_total`
+  counter.
+- **Queue-wait timeout** (`worker/tasks.py`) — checked at the very start of `run_inference`, on
+  every retry attempt (each retry is a fresh invocation of the same task function), comparing
+  `payload.enqueued_at` against `settings.queue_wait_timeout_seconds`. Distinct from the
+  **inference timeout**, which stays `httpx.Timeout` inside `OllamaProvider` (per-attempt because
+  a fresh `AsyncClient` — and therefore a fresh deadline — is constructed on every `chat()` call).
+- **Timeout classification hardening** — `OllamaProvider.chat()` now explicitly catches
+  `httpx.TimeoutException` and re-raises `TimeoutError` with a message engineered to contain
+  "timed out", because `worker/tasks.py:_classify_error` tells `INFERENCE_TIMEOUT` apart from
+  `INFERENCE_ERROR` by string-matching `error_message`, and httpx doesn't guarantee its own
+  exception message mentions timing out at all. Caught by inspection while implementing the
+  timeout distinction, not by a failing test — worth flagging because it's exactly the kind of gap
+  that stays invisible until a real timeout actually fires with an unhelpful message.
+
+**Tests:** `tests/unit/test_circuit_breaker.py` (7 tests, pure state-machine coverage) +
+`tests/integration/test_worker_phase2.py` (5 tests, exercising the real `run_inference` Celery
+task via `Task.apply()` — bound tasks build their own sync Redis client internally rather than
+accepting one as a parameter, so `redis.Redis.from_url` is monkeypatched to return a fakeredis
+client; discovered along the way that `Task.apply()` internally calls `asyncio.run()`, which
+cannot run from inside an already-running event loop, so these tests have to be plain `def`, not
+`async def`, despite being in a `pytest-asyncio` suite) + one backpressure test in
+`test_chat_api.py`. 52 tests total, `ruff`/`mypy` clean throughout.
+
+**Two more real bugs found only by running the real stack (Docker Compose, 2 worker replicas,
+live Ollama) — neither reachable by the unit/integration suite above, same pattern as every Phase
+1 finding in this log:**
+
+16. **Cancelling mid-stream never actually reached the worker — the request just ran to
+    completion anyway, wasting the full generation.** Demonstrated live: killed a `curl` client
+    2 seconds into a long streaming response; the task still finished 31 seconds later with
+    `status="success"`, never `status="cancelled"`.
+    *Root cause*: `app/api/chat.py:_sse_generator`'s `finally` block did
+    `if status == "cancelled" and await request.is_disconnected(): await
+    queue_service.mark_cancelled(...)`. The ASGI server (uvicorn) can cancel this coroutine
+    *directly* the moment it detects the transport closed — independently of, and often faster
+    than, this module's own `is_disconnected()` polling inside the `forward_events` loop ever
+    gets a chance to notice. When that direct cancellation lands *while the coroutine is already
+    unwinding into its own `finally` block*, the very first bare `await` inside that block (the
+    `await request.is_disconnected()` call) immediately re-raises `CancelledError` — aborting
+    everything after it in the block, including the `mark_cancelled()` Redis write the worker
+    polls for. The generator dies silently; nothing downstream ever learns the client left.
+    *Fix*: wrapped the critical cleanup (`mark_cancelled`, `pubsub.unsubscribe`, `pubsub.aclose`)
+    in `asyncio.shield()` + `try/except CancelledError`, and dropped the redundant
+    `await request.is_disconnected()` re-check inside `finally` (`status == "cancelled"` already
+    means the loop exited abnormally; there's no other way to reach that state). Verified by
+    re-running the identical live disconnect: `chat_request_cancelled` at 1.83s on the API side,
+    `inference_cancelled` on the worker side, same `request_id`, task total runtime 1.86s instead
+    of the full generation.
+17. **A worker killed mid-task (whole container, not just one prefork child) would have sat
+    invisible to every other worker for up to an hour.** *Cause*: `task_acks_late` +
+    `task_reject_on_worker_lost` only cover the case where Celery's own process monitor notices a
+    *child* process died while the parent survives to explicitly requeue it — if the entire
+    worker process tree disappears at once (the actual scenario in a "kill a worker" demo, or a
+    real container OOM-kill), recovery depends entirely on the Redis transport's own
+    `visibility_timeout`, which Celery does not set a project-specific default for — Kombu's
+    Redis transport default is 3600 seconds. Nobody had configured it, because nothing about it is
+    visible until you actually kill a worker mid-task and watch nothing happen for a very long
+    time. *Fix*: added `Settings.celery_visibility_timeout_seconds` (default 300s) and wired it
+    into `broker_transport_options`/`result_backend_transport_options` in `worker/celery_app.py`.
+    *Further live finding while verifying this fix*: even with a short visibility_timeout (20s,
+    temporarily, for the demo), the orphaned task wasn't redelivered until ~93 seconds after the
+    kill — Kombu's Redis transport's `restore_visible()` sweep is not a precise per-key-expiry
+    timer; `visibility_timeout` sets *when a message becomes eligible* for redelivery, not how
+    promptly the sweep actually runs. This is a disclosed, real limitation of the Redis transport
+    (RabbitMQ's transport doesn't have this gap) — acceptable for this project's scope, but the
+    kind of detail worth being able to name precisely rather than claim "instant recovery."
+    **This also produced an unplanned but genuinely good validation**: when the task finally *was*
+    redelivered at ~93s, `worker/tasks.py`'s queue-wait timeout check (finding above) correctly
+    fired `queue_wait_timeout_exceeded` and refused to run it — the recovered-but-now-stale task
+    was cleanly rejected rather than burning a full generation nobody was still waiting for. Two
+    Phase 2 mechanisms built independently, verified together, doing the right thing in
+    combination without being designed as a pair.
+
+**Live demonstrations, all against the real stack (Docker Compose + host Ollama, `llama3.2:3b`),
+matching `ROADMAP.md` Phase 2's exact definition-of-done list:**
+
+- **Kill Ollama mid-stream** → full retry-with-backoff lifecycle visible in worker logs (3
+  attempts, 0.5s → 1s backoff), terminal `event: error` with `INFERENCE_ERROR`, no hang. Circuit
+  breaker opened after the failure threshold (temporarily lowered to 2 for the demo) — a
+  *second*, completely fresh request then failed in 0.57s (vs. 2.19s for the first) with
+  `INFERENCE_UNAVAILABLE`, never touching Ollama at all, confirmed via a
+  `circuit_breaker_rejected` log line. The half-open probe-then-reopen cycle also fired correctly
+  when a probe landed right at the cooldown boundary — an accidental but welcome bonus
+  demonstration of that state transition.
+- **50 concurrent requests vs. low `--concurrency`** → fired 6 concurrent requests at a worker
+  capped to `--concurrency=2`; worker log timestamps show tasks executing in strict pairs, each
+  completion immediately followed by the next task's `received` line. Total wall time (~27s for 6
+  requests at ~8s each) matches 3 sequential batches of 2, not 6-way parallelism — the
+  `aurora_queue_depth` gauge itself turned out to be a weak signal for this (Celery's Redis
+  transport pulls messages off the broker list fast regardless of execution concurrency, so `LLEN`
+  read back to 0 almost immediately — already flagged as an approximation in the Phase 1 log,
+  confirmed here as a real, not just theoretical, limitation), but the log-timestamp evidence is
+  unambiguous.
+- **Client disconnect mid-stream** → see bug #16 above; this demo *is* the bug report and the fix
+  verification in one.
+- **Kill a worker mid-task** → see bug #17 above; same relationship — the demo surfaced the gap,
+  the fix closed it, a second live run confirmed recovery (with the caveat about sweep timing
+  documented rather than glossed over).
+
+**Verification:** `uv run pytest` — 52 passed. `ruff check .` — clean. `mypy app worker providers
+shared` — clean (37 source files). All four Phase 2 demos re-run clean after every fix above, with
+`.env` restored to its documented defaults (`CIRCUIT_BREAKER_FAILURE_THRESHOLD=5`,
+`CELERY_VISIBILITY_TIMEOUT_SECONDS=300`, `CELERY_WORKER_CONCURRENCY=4`, single worker replica)
+before the final health check.

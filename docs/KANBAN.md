@@ -52,16 +52,19 @@ Legend: 🟦 Backlog · 🟨 In Progress · 🟩 Done · ⛔ Blocked
 
 ## Phase 2 — Production hardening
 
-| Card | Status |
-|---|---|
-| Circuit breaker (`ERROR_HANDLING.md` §4) | 🟦 Backlog |
-| Backpressure rejection at API (`SERVER_BUSY`) | 🟦 Backlog |
-| Cooperative cancellation propagation, end-to-end | 🟦 Backlog |
-| Per-attempt vs per-task timeout distinction | 🟦 Backlog |
-| Demonstrate: kill Ollama mid-stream → clean `error` event | 🟦 Backlog |
-| Demonstrate: 50 concurrent requests vs `--concurrency=8` → queueing | 🟦 Backlog |
-| Demonstrate: client disconnect → worker actually stops (log proof) | 🟦 Backlog |
-| Demonstrate: kill worker mid-task → another worker picks it up (Flower) | 🟦 Backlog |
+Built on branch `phase2-4` (off `main`). Full writeup: `docs/DEVLOG.md` 2026-07-15.
+
+| Card | Status | Notes |
+|---|---|---|
+| Circuit breaker (`ERROR_HANDLING.md` §4) | 🟩 Done | `worker/reliability.py:CircuitBreaker`, state in `shared/circuit.py` so `app/` can read it without importing `worker/` |
+| Backpressure rejection at API (`SERVER_BUSY`) | 🟩 Done | `app/api/chat.py`, checked before any Postgres work; `aurora_backpressure_rejections_total` metric |
+| Cooperative cancellation propagation, end-to-end | 🟩 Done | fixed a real bug: cancellation never reached the worker at all — see DEVLOG #16 (`asyncio.shield` fix) |
+| Per-attempt vs per-task timeout distinction | 🟩 Done | queue-wait timeout in `worker/tasks.py`; inference timeout stays per-attempt via fresh `httpx.AsyncClient`; hardened timeout classification (DEVLOG) |
+| `celery_visibility_timeout_seconds` (not in original scope, found live) | 🟩 Done | Redis transport defaulted to 3600s with nothing configured — see DEVLOG #17 |
+| Demonstrate: kill Ollama mid-stream → clean `error` event | 🟩 Done | full retry-with-backoff lifecycle + circuit breaker open/half-open verified live |
+| Demonstrate: 50 concurrent requests vs `--concurrency=8` → queueing | 🟩 Done | ran with `--concurrency=2` (6 requests); log timestamps prove strict pairing, not parallel execution |
+| Demonstrate: client disconnect → worker actually stops (log proof) | 🟩 Done | this demo *found* bug #16 live, then verified the fix |
+| Demonstrate: kill worker mid-task → another worker picks it up (Flower) | 🟩 Done | this demo *found* bug #17 live (no `visibility_timeout` configured), then verified the fix + an emergent interaction with the queue-wait timeout |
 
 ## Phase 3 — Observability
 

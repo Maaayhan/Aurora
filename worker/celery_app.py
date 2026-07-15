@@ -44,4 +44,13 @@ celery_app.conf.update(
     # JSON lines' own `level` field (DEPLOYMENT.md §4: structured JSON to stdout). Disabling this
     # lets our already-leveled, already-JSON log lines pass through as written.
     worker_redirect_stdouts=False,
+    # Redis transport's own recovery timeout for an unacked task after its worker vanishes
+    # entirely — see the long comment on Settings.celery_visibility_timeout_seconds for why
+    # task_acks_late/task_reject_on_worker_lost alone aren't sufficient. Applied to both the
+    # broker and the result backend since both are configured against the same Redis instance
+    # here (ERROR_HANDLING.md §6).
+    broker_transport_options={"visibility_timeout": settings.celery_visibility_timeout_seconds},
+    result_backend_transport_options={
+        "visibility_timeout": settings.celery_visibility_timeout_seconds
+    },
 )

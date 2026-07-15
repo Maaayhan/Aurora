@@ -69,6 +69,29 @@ async def test_rate_limit_returns_429_with_retry_after(
     assert resp.headers["retry-after"] == "7"
 
 
+async def test_backpressure_returns_503_when_queue_depth_over_threshold(
+    app_client, test_user, monkeypatch
+):
+    from app.services import queue_service
+
+    async def always_over_threshold(*args, **kwargs):
+        return 99999
+
+    monkeypatch.setattr(queue_service, "get_queue_depth", always_over_threshold)
+
+    dispatched = []
+    monkeypatch.setattr(
+        queue_service, "dispatch_inference", lambda payload: dispatched.append(payload)
+    )
+
+    resp = await app_client.post(
+        "/chat", json={"message": "hi"}, headers={"X-API-Key": "sk-test-key"}
+    )
+    assert resp.status_code == 503
+    assert resp.json()["code"] == "SERVER_BUSY"
+    assert dispatched == []  # rejected before ever reaching dispatch (ERROR_HANDLING.md §5)
+
+
 async def test_second_message_in_a_conversation_reuses_history(
     app_client, fake_dispatch, test_user
 ):

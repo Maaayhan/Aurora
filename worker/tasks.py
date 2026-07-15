@@ -9,6 +9,7 @@ ever dispatched). Implements the worker side of SEQUENCE_DIAGRAMS.md §1
 import asyncio
 import time
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Literal
 
 import redis as sync_redis
@@ -22,7 +23,7 @@ from providers.factory import build_provider
 from shared.errors import ErrorCode
 from shared.schemas import InferenceTaskPayload, StreamMessage
 from worker.celery_app import celery_app
-from worker.reliability import CancellationChecker, compute_backoff_seconds
+from worker.reliability import CancellationChecker, CircuitBreaker, compute_backoff_seconds
 
 settings = get_settings()
 configure_logging(settings.log_level)
@@ -148,6 +149,12 @@ async def _persist_assistant_message(
 
 
 def _classify_error(message: str | None) -> ErrorCode:
+    # String-matching, not exception-type-matching, because by the time an outcome reaches here
+    # it's already been reduced to `error_message: str` (see InferenceOutcome) — this relies on
+    # provider implementations guaranteeing a "timed out"/"timeout" substring for timeout
+    # failures specifically (see providers/ollama_provider.py's httpx.TimeoutException handling,
+    # which re-raises with a message engineered to match this check rather than trusting
+    # httpx's own exception message, which isn't guaranteed to mention timing out at all).
     if message and "timeout" in message.lower():
         return ErrorCode.INFERENCE_TIMEOUT
     return ErrorCode.INFERENCE_ERROR
@@ -165,6 +172,53 @@ def run_inference(self, payload_dict: dict) -> None:
     start = time.monotonic()
 
     try:
+        # Queue-wait timeout (ERROR_HANDLING.md §2) — distinct from the inference timeout below:
+        # this measures time from dispatch to a worker actually starting the task, re-checked on
+        # every retry attempt too. A response that only starts after the client has plausibly
+        # given up waiting has negative value; failing fast lets the client retry when there's
+        # actually capacity instead of eventually getting an answer to a request it abandoned.
+        queue_wait_seconds = (datetime.now(UTC) - payload.enqueued_at).total_seconds()
+        if queue_wait_seconds > settings.queue_wait_timeout_seconds:
+            logger.warning(
+                "queue_wait_timeout_exceeded",
+                queue_wait_seconds=round(queue_wait_seconds, 2),
+            )
+            _publish(
+                redis_client,
+                payload.request_id,
+                StreamMessage(
+                    type="error",
+                    code=ErrorCode.SERVER_BUSY,
+                    message="Request waited too long in queue",
+                    retryable=False,
+                ),
+            )
+            return
+
+        circuit_breaker = CircuitBreaker(
+            redis_client,
+            failure_threshold=settings.circuit_breaker_failure_threshold,
+            window_seconds=settings.circuit_breaker_window_seconds,
+            cooldown_seconds=settings.circuit_breaker_cooldown_seconds,
+        )
+        decision = circuit_breaker.allow_request()
+        if not decision.allowed:
+            # Circuit is OPEN and still cooling down — fail fast without ever touching the model
+            # provider (ERROR_HANDLING.md §4). Not retried: hammering a struggling model with
+            # queued retries is exactly the cascading-failure pattern the breaker exists to stop.
+            logger.warning("circuit_breaker_rejected", state=decision.state.value)
+            _publish(
+                redis_client,
+                payload.request_id,
+                StreamMessage(
+                    type="error",
+                    code=ErrorCode.INFERENCE_UNAVAILABLE,
+                    message="Model is temporarily unavailable",
+                    retryable=False,
+                ),
+            )
+            return
+
         outcome = asyncio.run(_run_inference_async(payload, redis_client))
 
         if outcome.status == "cancelled":
@@ -172,6 +226,7 @@ def run_inference(self, payload_dict: dict) -> None:
             return
 
         if outcome.status == "error":
+            circuit_breaker.record_failure()
             attempt_number = self.request.retries + 1
             # Retries are only safe before any token has reached the client (ERROR_HANDLING.md
             # §3, SEQUENCE_DIAGRAMS.md §3) — a failure after partial output is always terminal.
@@ -208,6 +263,7 @@ def run_inference(self, payload_dict: dict) -> None:
             )
             return
 
+        circuit_breaker.record_success()
         latency_ms = int((time.monotonic() - start) * 1000)
         _publish(
             redis_client,
