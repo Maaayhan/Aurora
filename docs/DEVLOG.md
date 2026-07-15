@@ -451,3 +451,92 @@ shared` — clean (37 source files). All four Phase 2 demos re-run clean after e
 `.env` restored to its documented defaults (`CIRCUIT_BREAKER_FAILURE_THRESHOLD=5`,
 `CELERY_VISIBILITY_TIMEOUT_SECONDS=300`, `CELERY_WORKER_CONCURRENCY=4`, single worker replica)
 before the final health check.
+
+### Timeline (real timestamps from the actual session, UTC unless noted — kept as interview material)
+
+This is the literal sequence of events from the live verification pass, not a cleaned-up retelling
+— included because *how* the two real bugs below were found is as much the point as the bugs
+themselves: neither was hypothesized in advance, both surfaced from just running the documented
+Phase 2 demo scenarios and reading what actually happened instead of assuming it matched what was
+designed.
+
+1. **Circuit breaker + backpressure + queue-wait timeout code written**, unit/integration tests
+   passing against `MockProvider`/fakeredis (52 tests). Docker images rebuilt with the new code.
+2. **04:25 — Demo 1, kill Ollama mid-stream.** Full retry lifecycle observed cleanly: attempt
+   fails → 0.5s backoff → retry fails → 1.0s backoff → retry fails → terminal `INFERENCE_ERROR`
+   published (`04:27:22`–`04:27:27`). Client got a clean SSE `error` event, no hang. Worked
+   correctly on the first try — no bug here.
+3. **04:36 — Circuit breaker open/half-open, threshold temporarily lowered to 2 for a faster
+   demo.** First request's own retry sequence tripped the breaker open mid-retry (2nd failure hit
+   the threshold, saving the 3rd attempt from ever touching the network). A second, fresh request
+   fired ~15s later landed almost exactly on the cooldown boundary and caught the half-open probe,
+   which failed and reopened the circuit — an unplanned but accurate demonstration of that state
+   transition too. Circuit breaker config restored, Ollama restarted.
+4. **04:38 — Demo 2, concurrency limiting.** 6 concurrent requests fired at a worker capped to
+   `--concurrency=2`. `aurora_queue_depth` read back 0 almost immediately (Celery's Redis
+   transport pulls messages off the broker list fast regardless of execution concurrency — a real
+   limitation of the metric, not a bug, already flagged as an approximation in the Phase 1 log).
+   Worker log timestamps told the real story instead: tasks executed in strict pairs, each
+   completion immediately followed by the next task's `received` line, total wall time ~27s
+   matching 3 sequential batches of 2 — unambiguous proof concurrency was actually bounded.
+5. **04:40:37 — Demo 3 attempt 1, client disconnect mid-stream.** Killed the `curl` client 2s into
+   a long streaming response. **Bug found**: the task ran to full completion 31 seconds later
+   (`04:41:08`, `status="success"`), never `status="cancelled"`. Nothing in the API or worker logs
+   showed any cancellation activity at all.
+6. **04:42:55–04:43:17 — Diagnosis.** Added temporary diagnostic logging around
+   `request.is_disconnected()` inside `queue_service.forward_events`'s poll loop, rebuilt,
+   re-ran. Confirmed `is_disconnected()` was being checked constantly (every ~30ms, since token
+   messages arrive far faster than the 1s poll timeout) and *always* returned `False` — the
+   generator's own polling loop never had a chance to notice, because something else was already
+   short-circuiting it. Traced to `app/api/chat.py:_sse_generator`'s `finally` block: a bare
+   `await request.is_disconnected()` there, hit while the coroutine was already being cancelled
+   directly by uvicorn, immediately re-raised `CancelledError` and aborted the rest of the block
+   — including the `mark_cancelled()` Redis write the worker depends on.
+7. **Fix implemented**: wrapped the critical `finally`-block cleanup in `asyncio.shield()` +
+   `try/except CancelledError`; dropped the now-redundant `is_disconnected()` re-check. Diagnostic
+   logging removed. Full test suite re-run (52 passed), image rebuilt.
+8. **04:46:57–04:46:59 — Demo 3 attempt 2 (fix verification).** Identical disconnect test.
+   `chat_request_cancelled` logged at 1.83s on the API side; `inference_cancelled` logged on the
+   worker side for the same `request_id`; task total runtime 1.86s instead of the full ~20-30s
+   generation. Fixed.
+9. **04:49:37–04:50:01 — Demo 4 attempt 1, kill worker mid-task.** Scaled to 2 worker replicas,
+   fired a long-generation request, identified which replica picked it up, killed that container.
+   **Timing miss, not a bug**: the kill landed ~23 seconds after the task started, and the
+   response (536 completion tokens) had already finished generating in ~15.7s — the task
+   completed normally before the kill could interrupt anything.
+10. **04:52:09 — Investigated whether recovery would even be fast enough to observe.** Checked
+    `worker/celery_app.py` for a configured `visibility_timeout` before retrying the demo.
+    **Second bug found, by inspection this time, not by a failed demo**: nothing was configured,
+    meaning Kombu's Redis transport default (3600 seconds) was silently in effect — a worker
+    killed mid-task would have sat invisible to every other worker for up to an hour.
+11. **Fix implemented**: added `Settings.celery_visibility_timeout_seconds` (default 300s), wired
+    into `broker_transport_options`/`result_backend_transport_options`. Set to 20s temporarily via
+    `.env` for a demo-able recovery window; rebuilt; full test suite re-run clean.
+12. **04:52:31 — Demo 4 attempt 2 (fix verification), tighter timing.** Polled worker logs in a
+    100ms loop to catch the exact moment a task was `received`, killed that worker within ~150ms
+    of it starting. Confirmed via `redis-cli` that the task sat correctly in Celery's
+    `unacked`/`unacked_index` structures (`task_acks_late` working as designed).
+13. **04:52:36–04:54:05 — Recovery observed, with a caveat found along the way.** The orphaned
+    task wasn't actually redelivered until ~93 seconds after the kill — well past the configured
+    20s `visibility_timeout`. Root cause: `visibility_timeout` sets *when* a message becomes
+    eligible for redelivery, not how promptly Kombu's `restore_visible()` sweep actually runs;
+    that sweep isn't a precise per-key timer. Disclosed as a real, named limitation of the Redis
+    transport rather than glossed over.
+14. **04:54:05 — Unplanned bonus validation.** The moment the orphaned task *was* finally
+    redelivered, `worker/tasks.py`'s queue-wait timeout check (built independently, days — well,
+    steps — earlier in this same session) immediately fired `queue_wait_timeout_exceeded` and
+    refused to run it, rather than burning a full ~15s generation nobody was still waiting for.
+    Two Phase 2 mechanisms, built for unrelated reasons, caught this correctly in combination
+    without ever being designed as a pair.
+15. **Cleanup.** All temporary demo overrides reverted in `.env` (circuit breaker threshold 5,
+    visibility timeout 300s, worker concurrency 4, single replica). Full stack rebuilt clean, full
+    test suite re-run (52 passed), `ruff`/`mypy` clean, final `GET /health` confirmed all green.
+    Findings written up here; `docs/KANBAN.md` updated; committed to the `phase2-4` branch.
+
+**The pattern worth naming out loud, across both bugs**: neither was something a code review would
+likely have caught, and neither was something the (fairly thorough) Phase 1 unit/integration test
+suite could structurally reach — one required an ASGI server actually cancelling a live coroutine
+at a specific, timing-dependent moment; the other required an entire process tree actually dying
+and a real Redis broker actually enforcing (or failing to enforce) a timeout. Both only existed to
+find because the verification loop was "run the real thing and read what really happened," not
+"assume the design doc's happy path is what the code does."
