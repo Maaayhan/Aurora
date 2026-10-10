@@ -34,8 +34,9 @@ Design comes before code. Start here:
 Phase 1 (MVP) is implemented: `POST /chat` with SSE token streaming, JWT / API-key auth,
 Redis sliding-window rate limiting, Postgres-backed conversations, a Celery inference worker with
 retry-and-backoff and cooperative cancellation, structured JSON logs with request IDs, and Prometheus
-metrics including TTFT / TPOT. Tests (unit and integration) run against `MockProvider`, SQLite and
-fakeredis — **not yet against a live Postgres / Redis / Ollama stack**.
+metrics including TTFT / TPOT. The 39 automated tests run against `MockProvider`, SQLite and
+fakeredis; the full stack (Docker Compose, Postgres, Redis, a local Ollama model) was exercised
+end to end by hand, which found four bugs the tests could not (see `docs/DEVLOG.md`, 2026-07-14).
 
 Not built yet: circuit breaker (Phase 2), Grafana / Jaeger wiring (Phase 3), `scripts/deploy.py` /
 `rollback.py` and a vLLM provider (Phase 4). `docs/ROADMAP.md` still has its Phase 0 wording, and

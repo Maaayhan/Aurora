@@ -4,7 +4,7 @@ No fixed calendar dates. A Maincode take-home, if it comes, will land on its own
 
 Each phase has a **definition of done** — a concrete thing that must be demonstrable, not just "code exists."
 
-## Phase 0 — Design (current phase)
+## Phase 0 — Design (done)
 
 **Done when**: every doc in `docs/` exists, is internally consistent (no contradiction between `ARCHITECTURE.md` and `SEQUENCE_DIAGRAMS.md`, etc.), and can be explained out loud from a cold start without re-deriving the reasoning live. Repo skeleton exists (`app/`, `worker/`, `providers/`, `shared/`, `docker/`, `scripts/`) even though the directories are empty.
 
