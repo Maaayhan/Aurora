@@ -23,3 +23,7 @@ __pycache__/
 .ruff_cache/
 *.egg-info/
 .coverage
+
+# Local agent tooling
+.claude/
+skills-lock.json

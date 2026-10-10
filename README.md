@@ -31,7 +31,15 @@ Design comes before code. Start here:
 
 ## Status
 
-Design phase. No application code yet — see `docs/ROADMAP.md` for why that's intentional and what unlocks Phase 1 (code).
+Phase 1 (MVP) is implemented: `POST /chat` with SSE token streaming, JWT / API-key auth,
+Redis sliding-window rate limiting, Postgres-backed conversations, a Celery inference worker with
+retry-and-backoff and cooperative cancellation, structured JSON logs with request IDs, and Prometheus
+metrics including TTFT / TPOT. Tests (unit and integration) run against `MockProvider`, SQLite and
+fakeredis — **not yet against a live Postgres / Redis / Ollama stack**.
+
+Not built yet: circuit breaker (Phase 2), Grafana / Jaeger wiring (Phase 3), `scripts/deploy.py` /
+`rollback.py` and a vLLM provider (Phase 4). `docs/ROADMAP.md` still has its Phase 0 wording, and
+`docs/DEVLOG.md` records what was built, the bugs found while verifying, and the deviations from the design.
 
 ## Stack
 
@@ -42,11 +50,11 @@ Python 3.12 · FastAPI · Celery (Redis broker) · PostgreSQL (SQLAlchemy + Alem
 ```
 app/          FastAPI service — the API layer (auth, rate limiting, routes, SSE)
 worker/       Celery worker — the inference layer (retry, circuit breaker, streaming relay)
-providers/    ModelProvider interface + OllamaProvider / VLLMProvider / MockProvider
+providers/    ModelProvider interface + OllamaProvider / MockProvider (vLLM planned)
 shared/       Pydantic models shared across app/ and worker/ (task payload, SSE events, error codes)
 migrations/   Alembic schema migrations
 docker/       Docker Compose + service configs
 docs/         Everything in the table above
-scripts/      deploy.py / rollback.py, load-test scripts
+scripts/      create_user.py (deploy / rollback / load-test scripts are planned)
 tests/
 ```
