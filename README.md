@@ -50,7 +50,7 @@ Python 3.12 · FastAPI · Celery (Redis broker) · PostgreSQL (SQLAlchemy + Alem
 
 ```
 app/          FastAPI service — the API layer (auth, rate limiting, routes, SSE)
-worker/       Celery worker — the inference layer (retry, circuit breaker, streaming relay)
+worker/       Celery worker — the inference layer (retry with backoff, cancellation, streaming relay; circuit breaker not yet built)
 providers/    ModelProvider interface + OllamaProvider / MockProvider (vLLM planned)
 shared/       Pydantic models shared across app/ and worker/ (task payload, SSE events, error codes)
 migrations/   Alembic schema migrations
