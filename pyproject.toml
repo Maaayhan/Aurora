@@ -31,7 +31,7 @@ dev = [
   "ruff>=0.7",
   "mypy>=1.13",
   "aiosqlite>=0.20",
-  "fakeredis>=2.26",
+  "fakeredis[lua]>=2.26",
 ]
 
 [tool.pytest.ini_options]

@@ -4,7 +4,7 @@ Every row here is a scenario the system is designed to survive without an operat
 
 ## 1. Rate limiting
 
-**Algorithm**: sliding window log, per `identityId`, stored in Redis as a sorted set (`ratelimit:{identityId}`, score = request timestamp). On each request: `ZREMRANGEBYSCORE` to drop entries older than the window, `ZCARD` to count what's left, reject if `>= limit`, else `ZADD` the current timestamp.
+**Algorithm**: sliding window log, per `identityId`, stored in Redis as a sorted set (`ratelimit:{identityId}`, score = request timestamp). On each request: `ZREMRANGEBYSCORE` to drop entries older than the window, `ZCARD` to count what's left, reject if `>= limit`, else `ZADD` the current timestamp. These steps run as **one Lua script**, so the check and the add are atomic: as separate commands, concurrent requests all see `count < limit` before any of them has added its entry, and every one of them is let through. Each entry's member is unique (`timestamp:uuid`) so two requests in the same clock tick are not collapsed into one.
 
 Chosen over fixed-window counters because fixed windows allow a burst of `2x limit` right at a window boundary (limit at 23:59:59, limit again at 00:00:00) — a sliding log doesn't have that edge. Chosen over a token bucket because the requirement here is "N requests per window," not "smoothed throughput with burst allowance" — token bucket is the right tool when burst tolerance matters; it doesn't here.
 

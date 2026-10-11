@@ -34,7 +34,7 @@ Design comes before code. Start here:
 Phase 1 (MVP) is implemented: `POST /chat` with SSE token streaming, JWT / API-key auth,
 Redis sliding-window rate limiting, Postgres-backed conversations, a Celery inference worker with
 retry-and-backoff and cooperative cancellation, structured JSON logs with request IDs, and Prometheus
-metrics including TTFT / TPOT. The 39 automated tests run against `MockProvider`, SQLite and
+metrics including TTFT / TPOT. The 40 automated tests run against `MockProvider`, SQLite and
 fakeredis; the full stack (Docker Compose, Postgres, Redis, a local Ollama model) was exercised
 end to end by hand, which found four bugs the tests could not (see `docs/DEVLOG.md`, 2026-07-14).
 

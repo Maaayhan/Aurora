@@ -1,3 +1,5 @@
+import asyncio
+
 import fakeredis.aioredis
 import pytest
 
@@ -37,3 +39,35 @@ async def test_identities_are_isolated(redis):
         await check_rate_limit(redis, "user-1", limit=3, window_seconds=60)
     result = await check_rate_limit(redis, "user-2", limit=3, window_seconds=60)
     assert result.allowed is True
+
+
+class _YieldingRedis:
+    """Hands control back to the event loop before every command, as a network
+    round trip does against a real Redis. fakeredis completes each command
+    without yielding, which hides any gap between two separate commands."""
+
+    def __init__(self, inner):
+        self._inner = inner
+
+    def __getattr__(self, name):
+        attr = getattr(self._inner, name)
+
+        async def call(*args, **kwargs):
+            await asyncio.sleep(0)
+            return await attr(*args, **kwargs)
+
+        return call
+
+
+async def test_concurrent_requests_never_exceed_the_limit(redis):
+    """The check and the add must be one atomic step: with a check-then-add
+    sequence, every concurrent caller can observe `count < limit` before any of
+    them has added its entry, and all of them are let through."""
+    limit = 5
+    client = _YieldingRedis(redis)
+    results = await asyncio.gather(
+        *(check_rate_limit(client, "user-1", limit=limit, window_seconds=60) for _ in range(30))
+    )
+    allowed = sum(1 for r in results if r.allowed)
+    assert allowed == limit
+    assert await redis.zcard("ratelimit:user-1") == limit

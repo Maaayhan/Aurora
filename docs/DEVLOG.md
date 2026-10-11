@@ -318,3 +318,25 @@ Celery worker process, or a real Ollama response shape.
     logging by default, and treats anything it captures that isn't from its own logger as
     `WARNING`. *Fix*: `worker_redirect_stdouts=False` in `celery_app.conf`, letting structlog's
     already-leveled JSON lines pass through untouched.
+
+## 2026-10-11
+
+**Rate limiter made atomic.** `app/core/rate_limit.py` issued `ZREMRANGEBYSCORE`, `ZCARD` and `ZADD`
+as separate commands, so concurrent requests could all read `count < limit` before any of them had
+added its entry.
+
+*Evidence, against a real Redis 7 (60 concurrent requests, limit 5)*: the old code allowed **60**;
+the Lua version allowed **5**. The old run also left `zcard=55`, a second bug: the sorted-set member
+was the bare timestamp, so requests in the same clock tick collapsed into one entry and were
+under-counted.
+
+*Fix*: the whole decision is one Lua script (`EVAL`), and each member is `timestamp:uuid`.
+
+*Test*: `test_concurrent_requests_never_exceed_the_limit`. fakeredis completes each command without
+yielding to the event loop, which hides the race (the same test passed on the old code), so the test
+wraps the client to yield before every command, as a network round trip does. It fails on the old
+code (30 allowed, limit 5). Added `fakeredis[lua]` (`lupa`) as a dev dependency so fakeredis can run
+Lua. 40 tests, ruff and mypy clean.
+
+*Known limit*: the timestamp still comes from the API process, so clock skew between several API
+instances shifts window edges. Using Redis `TIME` inside the script would remove that.
