@@ -60,7 +60,7 @@ checkpoint produced
 
 ## 3. Configuration
 
-Single source of truth: `.env` at the repo root, loaded via a typed `pydantic-settings` config object (`app/core/config.py`, imported by both `app/` and `worker/`) — validated at process start, so the process refuses to boot with an invalid/missing required var rather than failing later at first use. No magic numbers in code — every threshold named in `ERROR_HANDLING.md` (timeouts, retry counts, circuit breaker thresholds, rate limit numbers, queue depth threshold) is an env var with a documented default.
+Single source of truth: `.env` at the repo root, loaded via a typed `pydantic-settings` config object (`app/core/config.py`, imported by both `app/` and `worker/`) — validated at process start, so the process refuses to boot with an invalid/missing required var rather than failing later at first use. Two checks beyond types: with `ENVIRONMENT=production`, `JWT_SECRET` must not be the placeholder and must be at least 32 bytes (a known signing key would let anyone mint valid tokens); and `RATE_LIMIT_REQUESTS` / `RATE_LIMIT_WINDOW_SECONDS` must be greater than 0 (a window of 0 silently disables limiting). No magic numbers in code — every threshold named in `ERROR_HANDLING.md` (timeouts, retry counts, circuit breaker thresholds, rate limit numbers, queue depth threshold) is an env var with a documented default.
 
 ## 4. Logging
 

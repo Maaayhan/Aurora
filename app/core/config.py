@@ -7,13 +7,24 @@ env var with a documented default here — no magic numbers in code.
 """
 
 from functools import lru_cache
-from typing import Literal
+from typing import Literal, Self
 
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+DEFAULT_JWT_SECRET = "change-me-in-real-env"
+MIN_JWT_SECRET_BYTES = 32  # HS256: RFC 7518 §3.2 asks for a key at least as long as the hash output
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+    # hide_input_in_errors: a failed validation must not print the rejected
+    # secret (or the whole settings object) into logs.
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+        hide_input_in_errors=True,
+    )
 
     environment: Literal["development", "production", "test"] = "development"
     log_level: str = "INFO"
@@ -30,7 +41,7 @@ class Settings(BaseSettings):
     celery_worker_concurrency: int = 4
 
     # Auth
-    jwt_secret: str = "change-me-in-real-env"
+    jwt_secret: str = DEFAULT_JWT_SECRET  # production refuses this and anything under 32 bytes
     jwt_algorithm: str = "HS256"
     jwt_access_token_ttl_minutes: int = 15
 
@@ -40,8 +51,10 @@ class Settings(BaseSettings):
     default_model: str = "llama3.2:3b"
 
     # Rate limiting — ERROR_HANDLING.md §1
-    rate_limit_requests: int = 60
-    rate_limit_window_seconds: int = 60
+    # Both must be positive: a window of 0 expires every entry at once (no
+    # limiting at all) and a limit of 0 rejects every request.
+    rate_limit_requests: int = Field(default=60, gt=0)
+    rate_limit_window_seconds: int = Field(default=60, gt=0)
 
     # Timeouts — ERROR_HANDLING.md §2
     queue_wait_timeout_seconds: int = 60
@@ -61,6 +74,18 @@ class Settings(BaseSettings):
 
     # Message limits — API_SPEC.md
     max_message_length: int = 4000
+
+    @model_validator(mode="after")
+    def _require_a_real_jwt_secret_in_production(self) -> Self:
+        if self.environment != "production":
+            return self
+        if self.jwt_secret.lower().startswith("change-me"):
+            raise ValueError("JWT_SECRET is still the placeholder value; set a real secret")
+        if len(self.jwt_secret.encode()) < MIN_JWT_SECRET_BYTES:
+            raise ValueError(
+                f"JWT_SECRET must be at least {MIN_JWT_SECRET_BYTES} bytes in production"
+            )
+        return self
 
 
 @lru_cache
