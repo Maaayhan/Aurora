@@ -340,3 +340,32 @@ Lua. 40 tests, ruff and mypy clean.
 
 *Known limit*: the timestamp still comes from the API process, so clock skew between several API
 instances shifts window edges. Using Redis `TIME` inside the script would remove that.
+
+**Startup configuration hardened (security and config behaviour change).** Found in an external review
+of the rate-limiter change; the issues predate it.
+
+1. **A publicly known JWT signing key could run in production.** `jwt_secret` defaulted to
+   `change-me-in-real-env`, which is also in `.env.example` and in this public repo, and nothing stopped
+   a production process from using it (PyJWT already warned that the key was 21 bytes). Anyone could then
+   mint valid tokens. *Fix*: with `ENVIRONMENT=production`, `Settings` refuses a secret that starts with
+   `change-me` or is shorter than 32 bytes (bytes, not characters). Development and test are unchanged.
+2. **The rate limit could be switched off by a typo.** `RATE_LIMIT_WINDOW_SECONDS=0` made the Lua script
+   `EXPIRE` the key immediately, so every request was allowed; `RATE_LIMIT_REQUESTS=0` rejected
+   everything. Neither was validated, although `config.py` claims invalid settings refuse to boot.
+   *Fix*: both fields are `Field(gt=0)` in every environment.
+3. **`Retry-After` was rounded down** (`int()`), so 59.6 s left was reported as 59 and a client that
+   waited exactly as told could be rejected again. *Fix*: `math.ceil()`.
+4. **Validation errors could echo the secret.** Without `hide_input_in_errors`, pydantic prints the
+   input as `head...tail`, which leaks the end of a rejected secret into the logs. *Fix*: the option is
+   set on `Settings`. A first version of the test asserted that the whole secret was absent and passed
+   even without the option, because of that truncation; it now checks a distinctive tail, and fails
+   when the option is removed.
+
+*Tests*: `tests/unit/test_config.py` (new) and one `Retry-After` test. The configuration tests run
+both with keyword arguments and through real environment variables followed by a bare `Settings()`,
+which is the path a deployed process takes. The refusal tests fail on the previous code. 60 tests,
+ruff and mypy clean.
+
+*Behaviour change for operators*: a production deployment that has not set a real `JWT_SECRET` of at
+least 32 bytes now fails at start-up instead of running. Not exercised through Docker Compose: no
+Compose service sets `ENVIRONMENT=production` today.

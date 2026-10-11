@@ -45,7 +45,7 @@ Legend: 🟦 Backlog · 🟨 In Progress · 🟩 Done · ⛔ Blocked
 | Prometheus metrics (7 required, `GET /metrics`) | 🟩 Done | confirmed non-zero real values (TTFT/TPOT) after live traffic |
 | `structlog` wiring (app + worker, JSON stdout, `request_id` on every line) | 🟩 Done | fixed Celery stomping the JSON `level` field (`worker_redirect_stdouts=False`) |
 | Docker Compose: `api`, `worker`, `postgres`, `redis`, `flower` | 🟩 Done | full stack up and healthy; fixed missing `README.md` in both Dockerfiles |
-| Tests: auth, rate limit, chat flow (via `MockProvider`), health | 🟩 Done | 39 tests, ruff clean, mypy clean |
+| Tests: auth, rate limit, chat flow (via `MockProvider`), health | 🟩 Done | 60 tests, ruff clean, mypy clean |
 | End-to-end verification against local Ollama | 🟩 Done | see `DEVLOG.md` 2026-07-14 for the full run and the 4 real bugs it caught |
 
 **Phase 1 status: DONE, for real** — code-complete and verified against the actual dependencies it was designed for (live Postgres, Redis, Ollama, Docker Compose), per `ROADMAP.md`'s own standard ("demonstrable, not just 'code exists'"). Docker Desktop's data and Ollama's models were relocated to an external drive (`/Volumes/Samsung870EVO`) since local disk only had ~2.7GB free — see `DEVLOG.md` for the setup.
