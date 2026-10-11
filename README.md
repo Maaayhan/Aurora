@@ -1,5 +1,7 @@
 # Aurora
 
+[![CI](https://github.com/Maaayhan/Aurora/actions/workflows/ci.yml/badge.svg)](https://github.com/Maaayhan/Aurora/actions/workflows/ci.yml)
+
 **A production-grade backend platform that serves open-source large language models through reliable APIs — streaming responses, session management, queuing, observability, and deployment workflows.**
 
 Aurora is not a chatbot. It's the platform a chatbot runs on.
