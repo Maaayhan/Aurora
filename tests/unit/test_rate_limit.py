@@ -1,8 +1,10 @@
 import asyncio
+from types import SimpleNamespace
 
 import fakeredis.aioredis
 import pytest
 
+from app.core import rate_limit
 from app.core.rate_limit import check_rate_limit
 
 
@@ -71,3 +73,15 @@ async def test_concurrent_requests_never_exceed_the_limit(redis):
     allowed = sum(1 for r in results if r.allowed)
     assert allowed == limit
     assert await redis.zcard("ratelimit:user-1") == limit
+
+
+async def test_retry_after_rounds_up_so_a_waiting_client_is_not_rejected_again(redis, monkeypatch):
+    clock = {"now": 1000.0}
+    monkeypatch.setattr(rate_limit, "time", SimpleNamespace(time=lambda: clock["now"]))
+
+    await check_rate_limit(redis, "user-1", limit=1, window_seconds=60)  # recorded at t=1000.0
+    clock["now"] = 1000.4  # 59.6 s left in the window
+    result = await check_rate_limit(redis, "user-1", limit=1, window_seconds=60)
+
+    assert result.allowed is False
+    assert result.retry_after_seconds == 60  # int() would say 59, and 59 s is still too early

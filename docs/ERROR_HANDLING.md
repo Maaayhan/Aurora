@@ -8,7 +8,7 @@ Every row here is a scenario the system is designed to survive without an operat
 
 Chosen over fixed-window counters because fixed windows allow a burst of `2x limit` right at a window boundary (limit at 23:59:59, limit again at 00:00:00) — a sliding log doesn't have that edge. Chosen over a token bucket because the requirement here is "N requests per window," not "smoothed throughput with burst allowance" — token bucket is the right tool when burst tolerance matters; it doesn't here.
 
-**On limit exceeded**: `429`, code `RATE_LIMITED`, `Retry-After` header set to the number of seconds until the oldest entry in the window expires. The request is rejected **before** touching the queue — a client that's over quota should never be able to add load to the inference layer at all.
+**On limit exceeded**: `429`, code `RATE_LIMITED`, `Retry-After` header set to the number of seconds until the oldest entry in the window expires, rounded up (a client that waits exactly that long is not rejected again). The request is rejected **before** touching the queue — a client that's over quota should never be able to add load to the inference layer at all.
 
 ## 2. Timeouts
 

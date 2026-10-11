@@ -16,6 +16,7 @@ Explicitly not responsible for queue depth or inference concurrency
 quota," before the request ever reaches the queue.
 """
 
+import math
 import time
 import uuid
 from dataclasses import dataclass
@@ -79,5 +80,6 @@ async def check_rate_limit(
     if int(allowed) == 1:
         return RateLimitResult(allowed=True, retry_after_seconds=0)
 
-    retry_after = max(1, int(float(oldest_ts) + window_seconds - now))
+    # Round up: 59.6 s left must say 60, or a client that waits exactly as told is rejected again.
+    retry_after = max(1, math.ceil(float(oldest_ts) + window_seconds - now))
     return RateLimitResult(allowed=False, retry_after_seconds=retry_after)
